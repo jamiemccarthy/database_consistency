@@ -147,11 +147,12 @@ module DatabaseConsistency
     # Returns the normalized WHERE SQL produced by a conditions proc, or nil if
     # it cannot be determined (complex proc, unsupported AR version, etc.).
     def conditions_where_sql(model, conditions)
-      sql = model.unscoped.instance_exec(&conditions).to_sql
-      where_part = sql.split(/\bWHERE\b/i, 2).last
+      relation = model.unscoped.instance_exec(&conditions)
+                       .unscope(:order, :limit, :offset, :group, :having)
+      where_part = relation.to_sql.split(/\bWHERE\b/i, 2).last
       return nil unless where_part
 
-      normalize_condition_sql(where_part.gsub("#{model.quoted_table_name}.", '').gsub('"', ''))
+      normalize_condition_sql(where_part.gsub("#{model.quoted_table_name}.", '').gsub(/["`]/, ''))
     rescue StandardError
       nil
     end

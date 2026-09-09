@@ -93,4 +93,64 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       expect(models).to contain_exactly(Entities, Scoped::Entities, SubEntities)
     end
   end
+
+  describe '#conditions_where_sql' do
+    # The conditions proc may chain order/limit/offset/group/having after
+    # the where clause. These trailing clauses must not be included in the
+    # extracted predicate, because they are not part of the row-subset
+    # definition and will never appear in an index's WHERE.
+    before do
+      define_database_with_entity do |table|
+        table.string :state
+        table.string :name
+      end
+    end
+
+    let(:model) { define_class }
+
+    it 'extracts the WHERE clause with no trailing clauses' do
+      expect(described_class.conditions_where_sql(model, -> { where(state: 'draft') }))
+        .to eq("state = 'draft'")
+    end
+
+    it 'excludes ORDER BY from the predicate' do
+      with_order = described_class.conditions_where_sql(model, -> { where(state: 'draft').order(:id) })
+      without_order = described_class.conditions_where_sql(model, -> { where(state: 'draft') })
+      expect(with_order).to eq(without_order)
+    end
+
+    it 'excludes LIMIT from the predicate' do
+      with_limit = described_class.conditions_where_sql(model, -> { where(state: 'draft').limit(1) })
+      without_limit = described_class.conditions_where_sql(model, -> { where(state: 'draft') })
+      expect(with_limit).to eq(without_limit)
+    end
+
+    it 'excludes OFFSET from the predicate' do
+      with_offset = described_class.conditions_where_sql(model, -> { where(state: 'draft').offset(5) })
+      without_offset = described_class.conditions_where_sql(model, -> { where(state: 'draft') })
+      expect(with_offset).to eq(without_offset)
+    end
+
+    it 'excludes GROUP BY from the predicate' do
+      with_group = described_class.conditions_where_sql(model, -> { where(state: 'draft').group(:name) })
+      without_group = described_class.conditions_where_sql(model, -> { where(state: 'draft') })
+      expect(with_group).to eq(without_group)
+    end
+
+    it 'excludes GROUP BY and HAVING from the predicate' do
+      with_having = described_class.conditions_where_sql(
+        model, -> { where(state: 'draft').group(:name).having('COUNT(*) > 0') }
+      )
+      without_having = described_class.conditions_where_sql(model, -> { where(state: 'draft') })
+      expect(with_having).to eq(without_having)
+    end
+
+    it 'excludes all trailing clauses combined' do
+      combined = described_class.conditions_where_sql(
+        model, -> { where(state: 'draft').order(:id).limit(1).offset(5).group(:name) }
+      )
+      plain = described_class.conditions_where_sql(model, -> { where(state: 'draft') })
+      expect(combined).to eq(plain)
+    end
+  end
 end
