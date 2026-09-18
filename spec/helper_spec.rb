@@ -221,6 +221,21 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
         expect(described_class.normalize_condition_sql('(flag) IS NOT TRUE')).to eq('flag IS NOT 1')
       end
 
+      it 'keeps AND separate from a rewritten bare boolean predicate' do
+        pending 'the boolean predicate patterns swallow the space before the next AND or OR'
+        expect(described_class.normalize_condition_sql('f AND NOT g')).to eq('f = 1 AND g = 0')
+        expect(described_class.normalize_condition_sql('(f AND (NOT g))')).to eq('f = 1 AND g = 0')
+        expect(described_class.normalize_condition_sql('f = 1 AND g = 0')).to eq('f = 1 AND g = 0')
+      end
+
+      it 'keeps AND separate from a rewritten negated boolean predicate' do
+        pending 'the boolean predicate patterns swallow the space before the next AND or OR'
+        expect(described_class.normalize_condition_sql('NOT f AND g')).to eq('f = 0 AND g = 1')
+        expect(described_class.normalize_condition_sql('NOT f OR g')).to eq('f = 0 OR g = 1')
+        expect(described_class.normalize_condition_sql('a = 1 AND NOT f AND b = 2'))
+          .to eq('a = 1 AND b = 2 AND f = 0')
+      end
+
       it 'preserves boolean keywords inside string literals' do
         expect(described_class.normalize_condition_sql("label = 'IS TRUE'")).to eq("label = 'IS TRUE'")
       end
@@ -526,6 +541,38 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
     end
 
+    # PostgreSQL parses a partial index predicate, throws the text away and
+    # regenerates it from the parse tree, so `indexdef` wraps every comparison
+    # in parentheses and casts every operand. The inputs below are verbatim
+    # `indexdef` output; each is paired with the Active Record spelling it has
+    # to meet.
+    context 'with predicates copied from a PostgreSQL indexdef' do
+      it 'does not rewrite the argument of a function call' do
+        pending "parenthesis unwrapping reads a function call's own parenthesis as a wrapper"
+        expect(described_class.normalize_condition_sql("(lower((email)::text) = 'a@b.c'::text)"))
+          .to eq("lower(email) = 'a@b.c'")
+        expect(described_class.normalize_condition_sql("lower(email) = 'a@b.c'"))
+          .to eq("lower(email) = 'a@b.c'")
+      end
+
+      it 'normalizes a function call on both sides of a comparison' do
+        pending "parenthesis unwrapping reads a function call's own parenthesis as a wrapper"
+        expect(described_class.normalize_condition_sql('(lower((email)::text) = lower((name)::text))'))
+          .to eq('lower(email) = lower(name)')
+        expect(described_class.normalize_condition_sql('lower(email) = lower(name)'))
+          .to eq('lower(email) = lower(name)')
+      end
+
+      it 'normalizes a function call alongside another clause' do
+        pending "parenthesis unwrapping reads a function call's own parenthesis as a wrapper"
+        expect(
+          described_class.normalize_condition_sql("((lower((email)::text) = 'x'::text) AND (qty > 0))")
+        ).to eq("lower(email) = 'x' AND qty > 0")
+        expect(described_class.normalize_condition_sql("lower(email) = 'x' AND qty > 0"))
+          .to eq("lower(email) = 'x' AND qty > 0")
+      end
+    end
+
     # PostgreSQL quotes every negative and every exponent literal, and the only
     # thing separating one from a string is the cast: `::integer`, `::bigint`,
     # `::numeric` or `::double precision` for a number, `::text` for a string.
@@ -679,6 +726,11 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       it 'strips outer parens when a literal has unmatched parens and normalizes booleans' do
         expect(described_class.normalize_condition_sql("((label = 'Region (North)') AND active = TRUE)"))
           .to eq("active = 1 AND label = 'Region (North)'")
+      end
+
+      it 'leaves a CASE expression intact' do
+        expect(described_class.normalize_condition_sql('(CASE WHEN (a > 1) THEN b ELSE c END) = 1'))
+          .to eq('(CASE WHEN (a > 1) THEN b ELSE c END) = 1')
       end
     end
   end
