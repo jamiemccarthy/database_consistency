@@ -244,7 +244,9 @@ module DatabaseConsistency
     IN_LIST_OPENING = /(?<!\bIN\s)/i.freeze
 
     # Matches a bare identifier wrapped in parentheses, e.g. `(internal_name)`.
-    WRAPPED_IDENTIFIER = /#{IN_LIST_OPENING}\(([a-z_][\w.]*)\)/i.freeze
+    # The lookbehind keeps the argument list of a call such as `lower(name)`
+    # intact.
+    WRAPPED_IDENTIFIER = /(?<![\w.])#{IN_LIST_OPENING}\(([a-z_][\w.]*)\)/i.freeze
 
     # Matches a parenthesized numeric literal, e.g. `(0)` or `(0.001)`, which is
     # what a cast such as `(0)::numeric` leaves behind once the cast is gone.
@@ -265,19 +267,21 @@ module DatabaseConsistency
     # `OR`, or after an opening parenthesis. The whitespace before whatever
     # follows sits inside the lookahead, so the match leaves it in place instead
     # of consuming it and fusing the next `AND` / `OR` to the rewritten
-    # predicate.
+    # predicate. The lookbehind keeps a call's own parenthesis out of the
+    # boolean positions, so the argument of `lower(...)` is not read as a
+    # predicate of its own.
     NEGATED_BOOLEAN_PREDICATE = /
-      (^ | (?: \bAND\b | \bOR\b | \( ))
+      (^ | (?: \bAND\b | \bOR\b | (?<![\w.]) \( ))
       \s* NOT \s+ ([a-z_][\w.]*)
       (?= \s* (?: $ | \bAND\b | \bOR\b | \) ))
     /xi.freeze
 
     # Matches a bare boolean predicate such as `most_recent` in those same three
-    # places, with the same lookahead. It runs after the negated form so that
-    # `NOT archived` is already gone and cannot be read as the predicate
-    # `archived`.
+    # places, with the same lookahead and lookbehind. It runs after the negated
+    # form so that `NOT archived` is already gone and cannot be read as the
+    # predicate `archived`.
     BARE_BOOLEAN_PREDICATE = /
-      (^ | (?: \bAND\b | \bOR\b | \( ))
+      (^ | (?: \bAND\b | \bOR\b | (?<![\w.]) \( ))
       \s* ([a-z_][\w.]*)
       (?= \s* (?: $ | \bAND\b | \bOR\b | \) ))
     /xi.freeze

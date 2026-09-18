@@ -546,7 +546,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
     # to meet.
     context 'with predicates copied from a PostgreSQL indexdef' do
       it 'does not rewrite the argument of a function call' do
-        pending "parenthesis unwrapping reads a function call's own parenthesis as a wrapper"
         expect(described_class.normalize_condition_sql("(lower((email)::text) = 'a@b.c'::text)"))
           .to eq("lower(email) = 'a@b.c'")
         expect(described_class.normalize_condition_sql("lower(email) = 'a@b.c'"))
@@ -554,7 +553,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'normalizes a function call on both sides of a comparison' do
-        pending "parenthesis unwrapping reads a function call's own parenthesis as a wrapper"
         expect(described_class.normalize_condition_sql('(lower((email)::text) = lower((name)::text))'))
           .to eq('lower(email) = lower(name)')
         expect(described_class.normalize_condition_sql('lower(email) = lower(name)'))
@@ -562,7 +560,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'normalizes a function call alongside another clause' do
-        pending "parenthesis unwrapping reads a function call's own parenthesis as a wrapper"
         expect(
           described_class.normalize_condition_sql("((lower((email)::text) = 'x'::text) AND (qty > 0))")
         ).to eq("lower(email) = 'x' AND qty > 0")
