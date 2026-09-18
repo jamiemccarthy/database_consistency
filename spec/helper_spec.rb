@@ -222,14 +222,12 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'keeps AND separate from a rewritten bare boolean predicate' do
-        pending 'the boolean predicate patterns swallow the space before the next AND or OR'
         expect(described_class.normalize_condition_sql('f AND NOT g')).to eq('f = 1 AND g = 0')
         expect(described_class.normalize_condition_sql('(f AND (NOT g))')).to eq('f = 1 AND g = 0')
         expect(described_class.normalize_condition_sql('f = 1 AND g = 0')).to eq('f = 1 AND g = 0')
       end
 
       it 'keeps AND separate from a rewritten negated boolean predicate' do
-        pending 'the boolean predicate patterns swallow the space before the next AND or OR'
         expect(described_class.normalize_condition_sql('NOT f AND g')).to eq('f = 0 AND g = 1')
         expect(described_class.normalize_condition_sql('NOT f OR g')).to eq('f = 0 OR g = 1')
         expect(described_class.normalize_condition_sql('a = 1 AND NOT f AND b = 2'))

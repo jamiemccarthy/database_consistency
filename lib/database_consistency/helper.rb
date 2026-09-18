@@ -262,20 +262,24 @@ module DatabaseConsistency
 
     # Matches a bare negated boolean predicate such as `NOT archived`, in the
     # three places one can stand: at the start of an expression, after `AND` or
-    # `OR`, or after an opening parenthesis.
+    # `OR`, or after an opening parenthesis. The whitespace before whatever
+    # follows sits inside the lookahead, so the match leaves it in place instead
+    # of consuming it and fusing the next `AND` / `OR` to the rewritten
+    # predicate.
     NEGATED_BOOLEAN_PREDICATE = /
       (^ | (?: \bAND\b | \bOR\b | \( ))
-      \s* NOT \s+ ([a-z_][\w.]*) \s*
-      (?= $ | (?: \bAND\b | \bOR\b | \) ))
+      \s* NOT \s+ ([a-z_][\w.]*)
+      (?= \s* (?: $ | \bAND\b | \bOR\b | \) ))
     /xi.freeze
 
     # Matches a bare boolean predicate such as `most_recent` in those same three
-    # places. It runs after the negated form so that `NOT archived` is already
-    # gone and cannot be read as the predicate `archived`.
+    # places, with the same lookahead. It runs after the negated form so that
+    # `NOT archived` is already gone and cannot be read as the predicate
+    # `archived`.
     BARE_BOOLEAN_PREDICATE = /
       (^ | (?: \bAND\b | \bOR\b | \( ))
-      \s* ([a-z_][\w.]*) \s*
-      (?= $ | (?: \bAND\b | \bOR\b | \) ))
+      \s* ([a-z_][\w.]*)
+      (?= \s* (?: $ | \bAND\b | \bOR\b | \) ))
     /xi.freeze
 
     # Matches `column = ANY (ARRAY[...])` or `column != ALL ((ARRAY[...]))`,
