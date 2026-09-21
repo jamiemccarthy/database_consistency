@@ -122,6 +122,7 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'preserves escaped single quotes inside literals' do
+        # validator conditions: -> { where(value: "it's") }
         expect(described_class.normalize_condition_sql("value = 'it''s'")).to include("'it''s'")
       end
 
@@ -131,6 +132,7 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'does not normalize TRUE or FALSE inside a string literal' do
+        # validator conditions: -> { where(label: 'TRUE') }
         expect(described_class.normalize_condition_sql("label = 'TRUE'")).to eq("label = 'TRUE'")
         expect(described_class.normalize_condition_sql("label = 'false'")).to eq("label = 'false'")
       end
@@ -146,6 +148,8 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'preserves an escaped inner boolean literal' do
+        # validator conditions: -> { where(label: "x = 't'") }
+        # index     where: "label = 'x = ''t'''"; PostgreSQL writes the value back unchanged
         expect(described_class.normalize_condition_sql("label = 'x = ''t'''"))
           .to eq("label = 'x = ''t'''")
       end
@@ -169,7 +173,11 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it "normalizes = TRUE and = 't' to the same comparison as IS TRUE" do
+        # validator conditions: -> { where(flag: true) }
         expect(described_class.normalize_condition_sql('flag = TRUE')).to eq('flag = 1')
+        # PostgreSQL deparses an index written as `flag = 't'` back to
+        # `flag = true`, so the quoted spelling reaches here from a
+        # hand-written condition rather than from a database.
         expect(described_class.normalize_condition_sql("flag = 't'")).to eq('flag = 1')
       end
 
@@ -195,16 +203,19 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
 
     context 'when identifiers are quoted' do
       it 'strips double-quoted identifiers' do
+        # validator conditions: -> { where(state: 'draft') } on PostgreSQL or SQLite
         expect(described_class.normalize_condition_sql("\"state\" = 'draft'")).to eq("state = 'draft'")
       end
 
       it 'strips backtick-quoted identifiers' do
+        # validator conditions: -> { where(state: 'draft') } on MySQL
         expect(described_class.normalize_condition_sql("`state` = 'draft'")).to eq("state = 'draft'")
       end
     end
 
     context 'with parenthesized numeric literals' do
       it 'unwraps a parenthesized integer literal with a cast' do
+        # index     where: 'price > 0' on a numeric column
         expect(described_class.normalize_condition_sql('price > (0)::numeric')).to eq('price > 0')
       end
 
@@ -213,10 +224,12 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'unwraps a parenthesized small decimal literal' do
+        # index     where: 'ratio > 0.00001' on a double precision column
         expect(described_class.normalize_condition_sql('price > (0.00001)::double precision')).to eq('price > 0.00001')
       end
 
       it 'unwraps a parenthesized large integer literal with a cast' do
+        # index     where: 'price > 1000000' on a numeric column
         expect(described_class.normalize_condition_sql('price > (1000000)::numeric')).to eq('price > 1000000')
       end
 
@@ -230,6 +243,7 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'does not unwrap parentheses around a number-string literal' do
+        # validator conditions: -> { where(code: '(0)') }
         expect(described_class.normalize_condition_sql("code = '(0)'")).to eq("code = '(0)'")
       end
     end
@@ -240,10 +254,13 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'strips a character varying cast' do
+        # index     the spelling PostgreSQL gives a varchar value inside ARRAY[...];
+        # a bare comparison comes back as `(label)::text = 'x'::text`
         expect(described_class.normalize_condition_sql("label = 'x'::character varying")).to eq("label = 'x'")
       end
 
       it 'strips a timestamp without time zone cast' do
+        # index     where: "created_at > '2024-01-01'" on a timestamp column
         expect(described_class.normalize_condition_sql("created_at > '2024-01-01'::timestamp without time zone"))
           .to eq("created_at > '2024-01-01'")
       end
@@ -276,6 +293,7 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'normalizes a Postgres indexdef-style ANY array wrapped in extra parentheses' do
+        # index     where: "state IN ('draft','canon')" on a varchar column
         expect(described_class.normalize_condition_sql(
                  "((state)::text = ANY ((ARRAY['draft'::character varying, " \
                  "'canon'::character varying])::text[]))"
@@ -284,6 +302,7 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'keeps the parentheses of an IN list' do
+        # validator conditions: -> { where(state: %w[draft published]) }
         expect(described_class.normalize_condition_sql("(state IN ('draft', 'published'))"))
           .to eq("state IN ('draft', 'published')")
       end
@@ -331,6 +350,7 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'normalizes a Postgres indexdef-style ALL array wrapped in extra parentheses' do
+        # index     where: "state NOT IN ('x','y')" on a varchar column
         expect(described_class.normalize_condition_sql(
                  "((state)::text <> ALL ((ARRAY['x'::character varying, " \
                  "'y'::character varying])::text[]))"
@@ -339,6 +359,7 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'leaves the NOT IN Active Record generates unchanged' do
+        # validator conditions: -> { where.not(state: %w[x y]) }
         expect(described_class.normalize_condition_sql("state NOT IN ('x', 'y')"))
           .to eq("state NOT IN ('x', 'y')")
       end
@@ -351,7 +372,9 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
     # writes; a string keeps them.
     context 'with negative and exponent numeric literals' do
       it 'leaves a quoted value carrying a text cast alone' do
+        # index     where: "code = '-1'" on a varchar column
         expect(described_class.normalize_condition_sql("((code)::text = '-1'::text)")).to eq("code = '-1'")
+        # validator conditions: -> { where(code: '-1') }
         expect(described_class.normalize_condition_sql("code = '-1'")).to eq("code = '-1'")
       end
 
@@ -365,16 +388,19 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'keeps every digit of a wide numeric literal' do
+        # index     where: 'amount > 1000000000000000000000000000000'
         expect(described_class.normalize_condition_sql("(amount > '1000000000000000000000000000000'::numeric)"))
           .to eq('amount > 1000000000000000000000000000000')
       end
 
       it 'unquotes a bigint literal' do
+        # index     where: 'b > 3000000000' and 'b > -3000000000' on a bigint column
         expect(described_class.normalize_condition_sql("(b > '3000000000'::bigint)")).to eq('b > 3000000000')
         expect(described_class.normalize_condition_sql("(b > '-3000000000'::bigint)")).to eq('b > -3000000000')
       end
 
       it 'unquotes a positive literal that Postgres had to coerce' do
+        # index     where: 'amount > 100000000000000000000' on a numeric column
         expect(described_class.normalize_condition_sql("(amount > '100000000000000000000'::numeric)"))
           .to eq('amount > 100000000000000000000')
       end
@@ -382,43 +408,54 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       it 'unquotes only the numeric side of a mixed predicate' do
         expect(
           described_class.normalize_condition_sql(
+            # index     where: "code = '-1' AND amount > -1", varchar and numeric columns
             "(((code)::text = '-1'::text) AND (amount > ('-1'::integer)::numeric))"
           )
         ).to eq("amount > -1 AND code = '-1'")
       end
 
       it 'leaves a string literal that merely contains a cast alone' do
+        # index     where: "code = '-1::numeric'" on a varchar column
         expect(described_class.normalize_condition_sql("((code)::text = '-1::numeric'::text)"))
           .to eq("code = '-1::numeric'")
       end
 
       it 'keeps a negative operand parenthesized where precedence needs it' do
+        # index     where: 'qty % -3 = 0' on an integer column
         expect(described_class.normalize_condition_sql("((qty % '-3'::integer) = 0)")).to eq('(qty % -3) = 0')
       end
 
       it 'unquotes a negative integer' do
+        # index     where: 'qty > -1' on an integer column
         expect(described_class.normalize_condition_sql("(qty > '-1'::integer)")).to eq('qty > -1')
       end
 
       it 'unquotes a negative integer widened by a nested numeric cast' do
+        # index     where: 'amount > -1' on a numeric column: the literal is coerced
+        # to integer first, then widened to the column's type
         expect(described_class.normalize_condition_sql("(amount > ('-1'::integer)::numeric)")).to eq('amount > -1')
       end
 
       it 'unquotes a negative decimal' do
+        # index     where: 'amount > -1.5' on a numeric column
         expect(described_class.normalize_condition_sql("(amount > '-1.5'::numeric)")).to eq('amount > -1.5')
       end
 
       it 'unquotes a negative float through its numeric cast' do
+        # index     where: 'ratio > -1.5' on a double precision column
         expect(described_class.normalize_condition_sql("(ratio > ('-1.5'::numeric)::double precision)"))
           .to eq('ratio > -1.5')
       end
 
       it 'unquotes a negative element inside an ARRAY' do
+        # index     where: 'qty IN (-1, 2)' on an integer column
         expect(described_class.normalize_condition_sql("(qty = ANY (ARRAY['-1'::integer, 2]))"))
           .to eq('qty IN (-1, 2)')
       end
 
       it 'expands an exponent literal to the decimal Postgres writes' do
+        # index     where: "ratio > '1e+20'::double precision". A quoted literal keeps
+        # its exponent; PostgreSQL expands a bare `1e+20` itself before storing it.
         expect(described_class.normalize_condition_sql("(ratio > '1e+20'::double precision)"))
           .to eq('ratio > 100000000000000000000')
         expect(described_class.normalize_condition_sql("(ratio > '1e-20'::double precision)"))
@@ -426,17 +463,20 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'expands a negative exponent with a fractional mantissa' do
+        # index     where: "ratio > '-1.5e-25'::double precision"
         expect(described_class.normalize_condition_sql("(ratio > '-1.5e-25'::double precision)"))
           .to eq('ratio > -0.00000000000000000000000015')
       end
 
       # Active Record writes a float with an explicit `.0` mantissa.
       it 'expands the exponent Active Record writes to the same digits' do
+        # validator conditions: -> { where('ratio > ?', 1e20) }
         expect(described_class.normalize_condition_sql('ratio > 1.0e+20')).to eq('ratio > 100000000000000000000')
         expect(described_class.normalize_condition_sql('ratio > 1.0e-20')).to eq('ratio > 0.00000000000000000001')
       end
 
       it 'leaves a decimal Postgres has already expanded alone' do
+        # index     where: 'amount > 1e-20' on a numeric column
         expect(described_class.normalize_condition_sql('(amount > 0.00000000000000000001)'))
           .to eq('amount > 0.00000000000000000001')
       end
@@ -444,12 +484,14 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       it 'expands an exponent element inside an ARRAY' do
         expect(
           described_class.normalize_condition_sql(
+            # index     where: "ratio IN ('1e+20'::double precision, 2)"
             "(ratio = ANY (ARRAY['1e+20'::double precision, (2)::double precision]))"
           )
         ).to eq('ratio IN (100000000000000000000, 2)')
       end
 
       it 'does not expand digits that belong to an identifier' do
+        # validator conditions: -> { where(a1e5: 1) }, a column whose name ends in digits
         expect(described_class.normalize_condition_sql('a1e5 = 1')).to eq('a1e5 = 1')
       end
     end
