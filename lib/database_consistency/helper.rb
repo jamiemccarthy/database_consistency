@@ -194,6 +194,87 @@ module DatabaseConsistency
     # for a column name by the boolean-predicate normalizer.
     LITERAL_PLACEHOLDER = '__DATABASE_CONSISTENCY_LITERAL<%<index>d>__'
 
+    # Matches one single-quoted string literal, including any `''` it contains:
+    # SQL escapes a quote by doubling it, so a `''` pair is part of the value
+    # rather than the end of it.
+    CONDITION_LITERAL = /'(?:[^']|'')*'/.freeze
+
+    # Matches a number PostgreSQL had to quote in order to coerce it, together
+    # with the cast that says it is a number rather than a string. `::text` is
+    # deliberately absent from the list so a genuine string keeps its quotes.
+    COERCED_NUMERIC_LITERAL = /
+      ' (-? \d+ (?:\.\d+)? (?: e[+-]?\d+ )? ) '
+      (?= :: (?: integer | bigint | numeric | double\s+precision ) \b )
+    /xi.freeze
+
+    # Matches a PostgreSQL cast, covering the type names written as several
+    # words and the `[]` of an array type: `::text`, `::text[]`,
+    # `::double precision`, `::character varying`,
+    # `::timestamp without time zone`.
+    CONDITION_CAST = /
+      ::
+      (?:
+        character\s+varying |
+        double\s+precision |
+        timestamp\s+(?:with|without)\s+time\s+zone |
+        \w+
+      )
+      (?:\[\])?
+    /xi.freeze
+
+    # Matches a number written in exponent notation, capturing the sign, the
+    # digits on each side of the decimal point and the exponent separately so
+    # the point can be shifted through the digits as text. The lookbehind keeps
+    # the digits of an identifier such as `a1e5` out of it.
+    EXPONENT_LITERAL = /
+      (?<![\w.])
+      (-?) (\d+) (?: \.(\d+) )? e ([+-]?\d+)
+    /xi.freeze
+
+    # Matches a bare identifier wrapped in parentheses, e.g. `(internal_name)`.
+    WRAPPED_IDENTIFIER = /\(([a-z_][\w.]*)\)/i.freeze
+
+    # Matches a parenthesized numeric literal, e.g. `(0)` or `(0.001)`, which is
+    # what a cast such as `(0)::numeric` leaves behind once the cast is gone.
+    WRAPPED_NUMBER = /\((-?\d+(?:\.\d+)?(?:e-?\d+)?)\)/.freeze
+
+    # Matches a bare negated boolean predicate such as `NOT archived`, in the
+    # three places one can stand: at the start of an expression, after `AND` or
+    # `OR`, or after an opening parenthesis.
+    NEGATED_BOOLEAN_PREDICATE = /
+      (^ | (?: \bAND\b | \bOR\b | \( ))
+      \s* NOT \s+ ([a-z_][\w.]*) \s*
+      (?= $ | (?: \bAND\b | \bOR\b | \) ))
+    /xi.freeze
+
+    # Matches a bare boolean predicate such as `most_recent` in those same three
+    # places. It runs after the negated form so that `NOT archived` is already
+    # gone and cannot be read as the predicate `archived`.
+    BARE_BOOLEAN_PREDICATE = /
+      (^ | (?: \bAND\b | \bOR\b | \( ))
+      \s* ([a-z_][\w.]*) \s*
+      (?= $ | (?: \bAND\b | \bOR\b | \) ))
+    /xi.freeze
+
+    # Matches `column = ANY (ARRAY[...])` or `column != ALL ((ARRAY[...]))`,
+    # capturing the column name, the operator and the array payload. The inner
+    # parentheses come from Postgres indexdefs that wrap the array expression
+    # before casting; they are optional, but both or neither, so a group
+    # enclosing the whole predicate keeps its own.
+    ARRAY_MEMBERSHIP_PREDICATE = /
+      (?<column>[a-z_][\w.]*)\s*
+      (?<operator>=\s*ANY|(?:!=|<>)\s*ALL)\s*
+      \( (?: \(ARRAY\[(?<items>.*?)\]\) | ARRAY\[(?<items>.*?)\] ) \)
+    /xi.freeze
+
+    # Matches SQL like `NOT (column = '' OR column IS NULL)`, holding both sides
+    # to the same column with the backreference.
+    NEGATED_BLANK_OR_NIL_PREDICATE = /
+      NOT \s+ \( \s* \(?
+      ([a-z_][\w.]*) \s* = \s* '' \s+ OR \s+ \1 \s+ IS \s+ NULL
+      \)? \s* \)
+    /xi.freeze
+
     # Normalizes SQL predicates into a canonical form so semantically equivalent
     # Rails validators and database partial indexes can be compared safely.
     def normalize_condition_sql(sql)
@@ -233,7 +314,7 @@ module DatabaseConsistency
     # normalization relies on them.
     def mask_condition_literals(sql)
       literals = []
-      masked_sql = sql.gsub(/'(?:[^']|'')*'/) do |match|
+      masked_sql = sql.gsub(CONDITION_LITERAL) do |match|
         if match == "''"
           match
         else
@@ -259,9 +340,7 @@ module DatabaseConsistency
     # up with the bare numbers Active Record generates. A `::text` cast is left
     # alone so a genuine string comparison keeps its quotes.
     def unquote_numeric_literals(sql)
-      sql.gsub(
-        /'(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)'(?=::(?:integer|bigint|numeric|double\s+precision)\b)/i
-      ) { Regexp.last_match(1) }
+      sql.gsub(COERCED_NUMERIC_LITERAL) { Regexp.last_match(1) }
     end
 
     # Normalizations that intentionally operate on literal values and therefore
@@ -312,7 +391,7 @@ module DatabaseConsistency
     # generates reach the same string. The digits are shifted as text rather
     # than through a float, so a wide value keeps every one of them.
     def expand_exponent_literals(sql)
-      sql.gsub(/(?<![\w.])(-?)(\d+)(?:\.(\d+))?e([+-]?\d+)/i) do
+      sql.gsub(EXPONENT_LITERAL) do
         match = Regexp.last_match
         shift_decimal_point(match[1], "#{match[2]}#{match[3]}", match[2].length + match[4].to_i)
       end
@@ -339,24 +418,10 @@ module DatabaseConsistency
       # Strips quoted identifiers (double quotes on PostgreSQL/SQLite,
       # backticks on MySQL) so the same column normalizes across adapters.
       normalized_sql = sql.gsub(/["`]/, '')
-      # Removes PostgreSQL casts such as `column::text`, `column::text[]`,
-      # `column::double precision`, `column::character varying`, and
-      # `column::timestamp without time zone`.
-      normalized_sql = normalized_sql.gsub(
-        /::(?:character\s+varying|double\s+precision|timestamp\s+(?:with|without)\s+time\s+zone|\w+)(?:\[\])?/i,
-        ''
-      )
+      normalized_sql = normalized_sql.gsub(CONDITION_CAST, '')
       normalized_sql = expand_exponent_literals(normalized_sql)
-      # `/\(([a-z_][\w.]*)\)/i` unwraps a bare identifier surrounded by
-      # parentheses, e.g. `(internal_name)` -> `internal_name`.
-      normalized_sql = normalized_sql.gsub(/\(([a-z_][\w.]*)\)/i, '\1')
-      # `/\((-?\d+(?:\.\d+)?(?:e-?\d+)?)\)/` unwraps a parenthesized
-      # numeric literal, e.g. `(0)` -> `0` and `(0.001)` -> `0.001`, so
-      # Postgres casts like `(0)::numeric` normalize to the same form Active
-      # Record generates for bare numeric comparisons. (Scientific notation is
-      # accepted on input but Postgres normalizes it to decimal. Nested parens
-      # get unwrapped.)
-      true while normalized_sql.gsub!(/\((-?\d+(?:\.\d+)?(?:e-?\d+)?)\)/, '\1')
+      normalized_sql = normalized_sql.gsub(WRAPPED_IDENTIFIER, '\1')
+      true while normalized_sql.gsub!(WRAPPED_NUMBER, '\1')
       # `/\s*<>\s*/` rewrites the SQL inequality operator `<>` to `!=`.
       normalized_sql = normalized_sql.gsub(/\s*<>\s*/, ' != ')
       normalized_sql.gsub(/\s+/, ' ').strip
@@ -404,18 +469,13 @@ module DatabaseConsistency
     def normalize_boolean_predicates(sql)
       normalized_sql = sql.dup
 
-      # Matches a bare negated boolean predicate such as `NOT archived`
-      # appearing at the start of an expression, after `AND` / `OR`, or after
-      # an opening parenthesis, and rewrites it to `archived = 0`.
-      normalized_sql.gsub!(
-        /(^|(?:\bAND\b|\bOR\b|\())\s*NOT\s+([a-z_][\w.]*)\s*(?=$|(?:\bAND\b|\bOR\b|\)))/i
-      ) { "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 0" }
+      normalized_sql.gsub!(NEGATED_BOOLEAN_PREDICATE) do
+        "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 0"
+      end
 
-      # Matches a bare boolean predicate such as `most_recent` appearing in the
-      # same structural positions, and rewrites it to `most_recent = 1`.
-      normalized_sql.gsub!(
-        /(^|(?:\bAND\b|\bOR\b|\())\s*([a-z_][\w.]*)\s*(?=$|(?:\bAND\b|\bOR\b|\)))/i
-      ) { "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 1" }
+      normalized_sql.gsub!(BARE_BOOLEAN_PREDICATE) do
+        "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 1"
+      end
 
       normalized_sql.gsub(/\s+/, ' ').strip
     end
@@ -424,18 +484,7 @@ module DatabaseConsistency
     # into the `IN (...)` and `NOT IN (...)` Active Record generates for arrays.
     # `<>` has already become `!=` by this point in the pipeline.
     def normalize_array_any_predicates(sql)
-      sql.gsub(
-        # Matches `column = ANY (ARRAY[...])` or `column != ALL ((ARRAY[...]))`,
-        # capturing the column name, the operator and the array payload. The
-        # inner parentheses come from Postgres indexdefs that wrap the array
-        # expression before casting; they are optional, but both or neither,
-        # so a group enclosing the whole predicate keeps its own.
-        /
-          (?<column>[a-z_][\w.]*)\s*
-          (?<operator>=\s*ANY|(?:!=|<>)\s*ALL)\s*
-          \( (?: \(ARRAY\[(?<items>.*?)\]\) | ARRAY\[(?<items>.*?)\] ) \)
-        /xi
-      ) do
+      sql.gsub(ARRAY_MEMBERSHIP_PREDICATE) do
         match = Regexp.last_match
         membership = match[:operator].match?(/ANY/i) ? 'IN' : 'NOT IN'
 
@@ -446,11 +495,9 @@ module DatabaseConsistency
     # Rewrites negated "blank or nil" predicates into the same shape used by
     # `allow_blank`-derived guards: `IS NOT NULL AND != ''`.
     def normalize_negated_blank_or_nil_predicates(sql)
-      sql.gsub(
-        # Matches SQL like `NOT (column = '' OR column IS NULL)` while enforcing
-        # the same column name on both sides via backreference `\1`.
-        /NOT\s+\(\s*\(?([a-z_][\w.]*)\s*=\s*''\s+OR\s+\1\s+IS\s+NULL\)?\s*\)/i
-      ) { "#{Regexp.last_match(1)} IS NOT NULL AND #{Regexp.last_match(1)} != ''" }
+      sql.gsub(NEGATED_BLANK_OR_NIL_PREDICATE) do
+        "#{Regexp.last_match(1)} IS NOT NULL AND #{Regexp.last_match(1)} != ''"
+      end
     end
 
     # Sorts simple `AND` clauses so `a AND b` and `b AND a` normalize to the
