@@ -208,17 +208,21 @@ module DatabaseConsistency
     /xi.freeze
 
     # Matches a PostgreSQL cast, covering the type names written as several
-    # words and the `[]` of an array type: `::text`, `::text[]`,
-    # `::double precision`, `::character varying`,
-    # `::timestamp without time zone`.
+    # words, the length or precision an explicit cast carries and the `[]` of an
+    # array type: `::text`, `::text[]`, `::double precision`,
+    # `::character varying(3)`, `::numeric(5,2)`, `::time without time zone`.
+    # A date or time type carries its precision in the middle of its name, as
+    # `::timestamp(0) without time zone`, so that branch spells out its own.
     CONDITION_CAST = /
       ::
       (?:
         character\s+varying |
         double\s+precision |
-        timestamp\s+(?:with|without)\s+time\s+zone |
+        bit\s+varying |
+        (?:timestamp|time) (?:\(\d+\))? \s+ (?:with|without)\s+time\s+zone |
         \w+
       )
+      (?:\(\d+(?:\s*,\s*\d+)?\))?
       (?:\[\])?
     /xi.freeze
 
@@ -236,7 +240,17 @@ module DatabaseConsistency
 
     # Matches a parenthesized numeric literal, e.g. `(0)` or `(0.001)`, which is
     # what a cast such as `(0)::numeric` leaves behind once the cast is gone.
-    WRAPPED_NUMBER = /\((-?\d+(?:\.\d+)?(?:e-?\d+)?)\)/.freeze
+    # The lookbehind keeps the argument list of a call such as `abs(1)` intact.
+    WRAPPED_NUMBER = /(?<![\w.])\((-?\d+(?:\.\d+)?(?:e-?\d+)?)\)/.freeze
+
+    # Matches parentheses wrapping exactly one function call, such as the
+    # `(abs(1))` a removed `::numeric` cast leaves behind. The inner group
+    # recurses so the call's own argument list may nest, and the lookbehind
+    # keeps a call's own parentheses out of it.
+    WRAPPED_FUNCTION_CALL = /
+      (?<![\w.])
+      \( (?<call>[a-z_][\w.]* (?<arguments>\( (?:[^()] | \g<arguments>)* \)) ) \)
+    /xi.freeze
 
     # Matches a bare negated boolean predicate such as `NOT archived`, in the
     # three places one can stand: at the start of an expression, after `AND` or
@@ -351,10 +365,12 @@ module DatabaseConsistency
       # arbitrary whitespace so forms like `flag='t'` and `flag  <>   'f'` all
       # collapse to the same canonical shape. Inequality is preserved as `!=`
       # because `flag <> 't'` is not the same as `flag = 'f'` (NULL handling
-      # differs), so they must not share a canonical form.
+      # differs), so they must not share a canonical form. The lookbehind holds
+      # the equality patterns to a standalone `=`, so the ordering comparison in
+      # `note >= 't'` keeps both its operator and its value.
       sql
-        .gsub(/(?<![<!])\s*=\s*'t'/, ' = 1')
-        .gsub(/(?<![<!])\s*=\s*'f'/, ' = 0')
+        .gsub(/(?<![<>!])\s*=\s*'t'/, ' = 1')
+        .gsub(/(?<![<>!])\s*=\s*'f'/, ' = 0')
         .gsub(/\s*<>\s*'t'/, ' != 1')
         .gsub(/\s*<>\s*'f'/, ' != 0')
         .gsub(/\s*!=\s*'t'/, ' != 1')
@@ -399,7 +415,8 @@ module DatabaseConsistency
 
     # Places the decimal point `position` digits into `digits`, padding with
     # zeros on whichever side falls short and dropping a fraction that ends in
-    # them, so `1e-20` and `1.0e-20` land on the same digits.
+    # them, so `1e-20` and `1.0e-20` land on the same digits. A zero that only
+    # holds the decimal point's place goes too, so `0.1e+2` reaches `10`.
     def shift_decimal_point(sign, digits, position)
       expanded =
         if position >= digits.length
@@ -409,6 +426,7 @@ module DatabaseConsistency
         else
           "0.#{'0' * -position}#{digits}"
         end
+      expanded.sub!(/\A0+(?=\d)/, '')
 
       "#{sign}#{expanded}".sub(/(\.\d*?)0+\z/, '\1').chomp('.')
     end
@@ -420,11 +438,24 @@ module DatabaseConsistency
       normalized_sql = sql.gsub(/["`]/, '')
       normalized_sql = normalized_sql.gsub(CONDITION_CAST, '')
       normalized_sql = expand_exponent_literals(normalized_sql)
-      normalized_sql = normalized_sql.gsub(WRAPPED_IDENTIFIER, '\1')
-      true while normalized_sql.gsub!(WRAPPED_NUMBER, '\1')
+      normalized_sql = unwrap_redundant_parentheses(normalized_sql)
       # `/\s*<>\s*/` rewrites the SQL inequality operator `<>` to `!=`.
       normalized_sql = normalized_sql.gsub(/\s*<>\s*/, ' != ')
       normalized_sql.gsub(/\s+/, ' ').strip
+    end
+
+    # Removes the parentheses PostgreSQL puts around an operand it had to cast,
+    # which are redundant once the cast itself is gone: `(0)::numeric` -> `0`,
+    # `((name)::character varying(3))::text` -> `name`, `(abs(1))::numeric` ->
+    # `abs(1)`. Each pass repeats because removing one layer can expose another.
+    def unwrap_redundant_parentheses(sql)
+      normalized_sql = sql.dup
+
+      true while normalized_sql.gsub!(WRAPPED_IDENTIFIER, '\1')
+      true while normalized_sql.gsub!(WRAPPED_NUMBER, '\1')
+      true while normalized_sql.gsub!(WRAPPED_FUNCTION_CALL, '\k<call>')
+
+      normalized_sql
     end
 
     # Repeatedly removes one wrapping layer of parentheses when the whole SQL

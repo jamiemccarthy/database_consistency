@@ -204,7 +204,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       # so a comparison against the one-character string is an ordering predicate
       # on a text column and keeps both its operator and its value.
       it "leaves an ordering comparison against 't' or 'f' alone" do
-        pending 'the boolean-literal rewrite also matches the = of a >= comparison'
         # index     where: "note >= 't'" on a text column
         expect(described_class.normalize_condition_sql("(note >= 't'::text)")).to eq("note >= 't'")
         # index     where: "note <= 'f'"
@@ -234,7 +233,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'leaves the numeric argument of a function call alone' do
-        pending 'parenthesis unwrapping strips the parentheses of a function call'
         # index     where: 'qty = abs(1)' on an integer column
         expect(described_class.normalize_condition_sql('(qty = abs(1))')).to eq('qty = abs(1)')
         # validator conditions: -> { where('qty = abs(1)') }
@@ -246,7 +244,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       # A numeric column makes PostgreSQL cast the result of the call, and the
       # parentheses it groups the call in outlive the cast.
       it 'matches a function call against the cast PostgreSQL wraps it in' do
-        pending 'parenthesis unwrapping does not unwrap a parenthesized function call'
         # index     where: 'amount = abs(1)' on a numeric column
         expect(described_class.normalize_condition_sql('(amount = (abs(1))::numeric)')).to eq('amount = abs(1)')
         # validator conditions: -> { where('amount = abs(1)') }
@@ -300,7 +297,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'strips a time cast with and without a time zone' do
-        pending 'the cast pattern does not cover the time types'
         # index     where: "opens_at > '10:00:00'" on a time column
         expect(described_class.normalize_condition_sql("(opens_at > '10:00:00'::time without time zone)"))
           .to eq("opens_at > '10:00:00'")
@@ -312,13 +308,11 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'strips a bit varying cast' do
-        pending 'the cast pattern does not cover bit varying'
         # index     where: "mask = '101'" on a bit varying column
         expect(described_class.normalize_condition_sql("(mask = '101'::bit varying)")).to eq("mask = '101'")
       end
 
       it 'strips a cast that carries a length' do
-        pending 'the cast pattern does not cover a length or precision'
         # index     where: "nm::char(3) = 'ab'"
         expect(described_class.normalize_condition_sql("((nm)::character(3) = 'ab'::bpchar)"))
           .to eq("nm = 'ab'")
@@ -337,7 +331,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       # narrowing cast survives: PostgreSQL drops one that cannot change the
       # value, which is why the column here is declared wider than the cast.
       it 'strips a date or time cast that carries a precision' do
-        pending 'the cast pattern does not cover a precision inside a date or time type name'
         # index     where: "ts::timestamp(0) > '2024-01-01'" on a timestamp(6) column
         expect(described_class.normalize_condition_sql(
                  "((ts)::timestamp(0) without time zone > '2024-01-01 00:00:00'::timestamp without time zone)"
@@ -604,7 +597,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       # mantissa only ever reaches here from a hand-written condition. It still
       # has to land on the digits the index side writes.
       it 'expands a mantissa written below one to the same digits' do
-        pending 'exponent expansion keeps the leading zero of a mantissa below one'
         # validator conditions: -> { where('ratio > 0.1e+2') }; index where: 'ratio > 10'
         expect(described_class.normalize_condition_sql('ratio > 0.1e+2')).to eq('ratio > 10')
         # validator conditions: -> { where('ratio > 0.1e+21') }; index where: 'ratio > 1e+20'
