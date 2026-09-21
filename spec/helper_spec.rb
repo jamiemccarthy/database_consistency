@@ -199,6 +199,20 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       it 'preserves boolean keywords inside string literals' do
         expect(described_class.normalize_condition_sql("label = 'IS TRUE'")).to eq("label = 'IS TRUE'")
       end
+
+      # PostgreSQL writes a boolean comparison with the keyword, as `flag >= true`,
+      # so a comparison against the one-character string is an ordering predicate
+      # on a text column and keeps both its operator and its value.
+      it "leaves an ordering comparison against 't' or 'f' alone" do
+        pending 'the boolean-literal rewrite also matches the = of a >= comparison'
+        # index     where: "note >= 't'" on a text column
+        expect(described_class.normalize_condition_sql("(note >= 't'::text)")).to eq("note >= 't'")
+        # index     where: "note <= 'f'"
+        expect(described_class.normalize_condition_sql("(note <= 'f'::text)")).to eq("note <= 'f'")
+        # index     where: "note > 'f' AND note < 't'"
+        expect(described_class.normalize_condition_sql("((note > 'f'::text) AND (note < 't'::text))"))
+          .to eq("note < 't' AND note > 'f'")
+      end
     end
 
     context 'when identifiers are quoted' do
@@ -217,6 +231,26 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       it 'unwraps a parenthesized integer literal with a cast' do
         # index     where: 'price > 0' on a numeric column
         expect(described_class.normalize_condition_sql('price > (0)::numeric')).to eq('price > 0')
+      end
+
+      it 'leaves the numeric argument of a function call alone' do
+        pending 'parenthesis unwrapping strips the parentheses of a function call'
+        # index     where: 'qty = abs(1)' on an integer column
+        expect(described_class.normalize_condition_sql('(qty = abs(1))')).to eq('qty = abs(1)')
+        # validator conditions: -> { where('qty = abs(1)') }
+        expect(described_class.normalize_condition_sql('qty = abs(1)')).to eq('qty = abs(1)')
+        # index     where: 'amount = trunc(1.5)' on a numeric column
+        expect(described_class.normalize_condition_sql('(amount = trunc(1.5))')).to eq('amount = trunc(1.5)')
+      end
+
+      # A numeric column makes PostgreSQL cast the result of the call, and the
+      # parentheses it groups the call in outlive the cast.
+      it 'matches a function call against the cast PostgreSQL wraps it in' do
+        pending 'parenthesis unwrapping does not unwrap a parenthesized function call'
+        # index     where: 'amount = abs(1)' on a numeric column
+        expect(described_class.normalize_condition_sql('(amount = (abs(1))::numeric)')).to eq('amount = abs(1)')
+        # validator conditions: -> { where('amount = abs(1)') }
+        expect(described_class.normalize_condition_sql('amount = abs(1)')).to eq('amount = abs(1)')
       end
 
       it 'unwraps a parenthesized decimal literal with a cast' do
@@ -263,6 +297,66 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
         # index     where: "created_at > '2024-01-01'" on a timestamp column
         expect(described_class.normalize_condition_sql("created_at > '2024-01-01'::timestamp without time zone"))
           .to eq("created_at > '2024-01-01'")
+      end
+
+      it 'strips a time cast with and without a time zone' do
+        pending 'the cast pattern does not cover the time types'
+        # index     where: "opens_at > '10:00:00'" on a time column
+        expect(described_class.normalize_condition_sql("(opens_at > '10:00:00'::time without time zone)"))
+          .to eq("opens_at > '10:00:00'")
+        # validator conditions: -> { where("opens_at > '10:00:00'") }
+        expect(described_class.normalize_condition_sql("opens_at > '10:00:00'")).to eq("opens_at > '10:00:00'")
+        # index     where: "opens_at > '10:00:00+00'" on a timetz column
+        expect(described_class.normalize_condition_sql("(opens_at > '10:00:00+00'::time with time zone)"))
+          .to eq("opens_at > '10:00:00+00'")
+      end
+
+      it 'strips a bit varying cast' do
+        pending 'the cast pattern does not cover bit varying'
+        # index     where: "mask = '101'" on a bit varying column
+        expect(described_class.normalize_condition_sql("(mask = '101'::bit varying)")).to eq("mask = '101'")
+      end
+
+      it 'strips a cast that carries a length' do
+        pending 'the cast pattern does not cover a length or precision'
+        # index     where: "nm::char(3) = 'ab'"
+        expect(described_class.normalize_condition_sql("((nm)::character(3) = 'ab'::bpchar)"))
+          .to eq("nm = 'ab'")
+        # index     where: "nm::varchar(3) = 'ab'"
+        expect(described_class.normalize_condition_sql("(((nm)::character varying(3))::text = 'ab'::text)"))
+          .to eq("nm = 'ab'")
+        # validator conditions: -> { where("nm::varchar(3) = 'ab'") }
+        expect(described_class.normalize_condition_sql("nm::varchar(3) = 'ab'")).to eq("nm = 'ab'")
+        # index     where: 'amount::numeric(5,2) > 0'
+        expect(described_class.normalize_condition_sql('((amount)::numeric(5,2) > (0)::numeric)'))
+          .to eq('amount > 0')
+      end
+
+      # A date or time type carries its precision inside its name rather than
+      # after it, so the cast reads `::timestamp(0) without time zone`. Only a
+      # narrowing cast survives: PostgreSQL drops one that cannot change the
+      # value, which is why the column here is declared wider than the cast.
+      it 'strips a date or time cast that carries a precision' do
+        pending 'the cast pattern does not cover a precision inside a date or time type name'
+        # index     where: "ts::timestamp(0) > '2024-01-01'" on a timestamp(6) column
+        expect(described_class.normalize_condition_sql(
+                 "((ts)::timestamp(0) without time zone > '2024-01-01 00:00:00'::timestamp without time zone)"
+               )).to eq("ts > '2024-01-01 00:00:00'")
+        # validator conditions: -> { where("ts::timestamp(0) > '2024-01-01 00:00:00'") }
+        expect(described_class.normalize_condition_sql("ts::timestamp(0) > '2024-01-01 00:00:00'"))
+          .to eq("ts > '2024-01-01 00:00:00'")
+        # index     where: "tstz::timestamptz(0) > '2024-01-01'" on a timestamptz(6) column
+        expect(described_class.normalize_condition_sql(
+                 "((tstz)::timestamp(0) with time zone > '2024-01-01 00:00:00+00'::timestamp with time zone)"
+               )).to eq("tstz > '2024-01-01 00:00:00+00'")
+        # index     where: "tm::time(0) > '10:00'" on a time(6) column
+        expect(described_class.normalize_condition_sql(
+                 "((tm)::time(0) without time zone > '10:00:00'::time without time zone)"
+               )).to eq("tm > '10:00:00'")
+        # index     where: "tmtz::timetz(0) > '10:00+00'" on a timetz(6) column
+        expect(described_class.normalize_condition_sql(
+                 "((tmtz)::time(0) with time zone > '10:00:00+00'::time with time zone)"
+               )).to eq("tmtz > '10:00:00+00'")
       end
 
       it 'strips an array cast and normalizes ANY (ARRAY[...]) to IN (...)' do
@@ -362,6 +456,17 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
         # validator conditions: -> { where.not(state: %w[x y]) }
         expect(described_class.normalize_condition_sql("state NOT IN ('x', 'y')"))
           .to eq("state NOT IN ('x', 'y')")
+      end
+
+      # Only `= ANY` and `!= ALL` carry the meaning of `IN` and `NOT IN`; the
+      # other two pairings mean something else and keep their own spelling.
+      it 'rewrites ANY and ALL only for the operator that matches them' do
+        # index     where: "state <> ANY (ARRAY['a','b'])"
+        expect(described_class.normalize_condition_sql("(state <> ANY (ARRAY['a'::text, 'b'::text]))"))
+          .to eq("state != ANY (ARRAY['a', 'b'])")
+        # index     where: "state = ALL (ARRAY['a','b'])"
+        expect(described_class.normalize_condition_sql("(state = ALL (ARRAY['a'::text, 'b'::text]))"))
+          .to eq("state = ALL (ARRAY['a', 'b'])")
       end
     end
 
@@ -493,6 +598,25 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       it 'does not expand digits that belong to an identifier' do
         # validator conditions: -> { where(a1e5: 1) }, a column whose name ends in digits
         expect(described_class.normalize_condition_sql('a1e5 = 1')).to eq('a1e5 = 1')
+      end
+
+      # PostgreSQL expands an exponent before it stores the predicate, so this
+      # mantissa only ever reaches here from a hand-written condition. It still
+      # has to land on the digits the index side writes.
+      it 'expands a mantissa written below one to the same digits' do
+        pending 'exponent expansion keeps the leading zero of a mantissa below one'
+        # validator conditions: -> { where('ratio > 0.1e+2') }; index where: 'ratio > 10'
+        expect(described_class.normalize_condition_sql('ratio > 0.1e+2')).to eq('ratio > 10')
+        # validator conditions: -> { where('ratio > 0.1e+21') }; index where: 'ratio > 1e+20'
+        expect(described_class.normalize_condition_sql('ratio > 0.1e+21'))
+          .to eq('ratio > 100000000000000000000')
+      end
+
+      it 'keeps a zero that carries the value' do
+        # validator conditions: -> { where('ratio > 0e+0') }; index where: 'ratio > 0'
+        expect(described_class.normalize_condition_sql('ratio > 0e+0')).to eq('ratio > 0')
+        # validator conditions: -> { where('ratio > 0.5e+0') }; index where: 'ratio > 0.5'
+        expect(described_class.normalize_condition_sql('ratio > 0.5e+0')).to eq('ratio > 0.5')
       end
     end
 
