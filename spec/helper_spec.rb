@@ -440,6 +440,27 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
         expect(described_class.normalize_condition_sql('(qty <> ALL (ARRAY[1]))')).to eq('qty NOT IN (1)')
       end
 
+      # The space before an `IN` list is optional in SQL, and the list the index
+      # side arrives as always carries one, so both spellings settle on it.
+      it 'gives an IN list written without a space the one the index side has' do
+        pending 'IN without a space is normalized'
+        # validator conditions: -> { where('qty IN(?)', [1]) }
+        expect(described_class.normalize_condition_sql('(qty IN(1))')).to eq('qty IN (1)')
+        # validator conditions: -> { where('qty IN(?)', [1, 2]) }
+        expect(described_class.normalize_condition_sql('(qty IN(1, 2))')).to eq('qty IN (1, 2)')
+        # validator conditions: -> { where('qty NOT IN(?)', [1]) }
+        expect(described_class.normalize_condition_sql('(qty NOT IN(1))')).to eq('qty NOT IN (1)')
+      end
+
+      # Only `IN` as a word of its own opens a list, so a call whose name ends
+      # in those letters keeps both its spacing and its parentheses.
+      it 'leaves a function call whose name ends in IN alone' do
+        # validator conditions: -> { where('qty > min(1)') }
+        expect(described_class.normalize_condition_sql('qty > min(1)')).to eq('qty > min(1)')
+        # index     where: 'checkin > 0' on a numeric column
+        expect(described_class.normalize_condition_sql('(checkin > (0)::numeric)')).to eq('checkin > 0')
+      end
+
       # The parentheses around `ARRAY[...]` are optional but always come as a
       # pair, so a group enclosing the whole predicate keeps its own.
       it 'leaves an enclosing group intact around an IN list' do
