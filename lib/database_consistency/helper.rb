@@ -194,29 +194,141 @@ module DatabaseConsistency
     # for a column name by the boolean-predicate normalizer.
     LITERAL_PLACEHOLDER = '__DATABASE_CONSISTENCY_LITERAL<%<index>d>__'
 
+    # Matches one single-quoted string literal, including any `''` it contains:
+    # SQL escapes a quote by doubling it, so a `''` pair is part of the value
+    # rather than the end of it.
+    CONDITION_LITERAL = /'(?:[^']|'')*'/.freeze
+
+    # Matches a number PostgreSQL had to quote in order to coerce it, together
+    # with the cast that says it is a number rather than a string. `::text` is
+    # deliberately absent from the list so a genuine string keeps its quotes.
+    COERCED_NUMERIC_LITERAL = /
+      ' (-? \d+ (?:\.\d+)? (?: e[+-]?\d+ )? ) '
+      (?= :: (?: integer | bigint | numeric | double\s+precision ) \b )
+    /xi.freeze
+
+    # Matches a PostgreSQL cast, covering the type names written as several
+    # words, the length or precision an explicit cast carries and the `[]` of an
+    # array type: `::text`, `::text[]`, `::double precision`,
+    # `::character varying(3)`, `::numeric(5,2)`, `::time without time zone`.
+    # A date or time type carries its precision in the middle of its name, as
+    # `::timestamp(0) without time zone`, so that branch spells out its own.
+    CONDITION_CAST = /
+      ::
+      (?:
+        character\s+varying |
+        double\s+precision |
+        bit\s+varying |
+        (?:timestamp|time) (?:\(\d+\))? \s+ (?:with|without)\s+time\s+zone |
+        \w+
+      )
+      (?:\(\d+(?:\s*,\s*\d+)?\))?
+      (?:\[\])?
+    /xi.freeze
+
+    # Matches a number written in exponent notation, capturing the sign, the
+    # digits on each side of the decimal point and the exponent separately so
+    # the point can be shifted through the digits as text. The lookbehind keeps
+    # the digits of an identifier such as `a1e5` out of it.
+    EXPONENT_LITERAL = /
+      (?<![\w.])
+      (-?) (\d+) (?: \.(\d+) )? e ([+-]?\d+)
+    /xi.freeze
+
+    # The parentheses right after `IN` or `NOT IN` are the list itself rather
+    # than something wrapped around a value, so the patterns below leave them
+    # alone and `qty IN (1)` stays a list of one. This covers only the
+    # parenthesis that opens the list; a value with parentheses of its own
+    # further along it, such as the `(1)` in `qty IN ((1), 2)`, still loses
+    # them.
+    IN_LIST_OPENING = /(?<!\bIN\s)/i.freeze
+
+    # Matches a bare identifier wrapped in parentheses, e.g. `(internal_name)`.
+    WRAPPED_IDENTIFIER = /#{IN_LIST_OPENING}\(([a-z_][\w.]*)\)/i.freeze
+
+    # Matches a parenthesized numeric literal, e.g. `(0)` or `(0.001)`, which is
+    # what a cast such as `(0)::numeric` leaves behind once the cast is gone.
+    # The lookbehind keeps the argument list of a call such as `abs(1)` intact.
+    WRAPPED_NUMBER = /(?<![\w.])#{IN_LIST_OPENING}\((-?\d+(?:\.\d+)?(?:e-?\d+)?)\)/.freeze
+
+    # Matches parentheses wrapping exactly one function call, such as the
+    # `(abs(1))` a removed `::numeric` cast leaves behind. The inner group
+    # recurses so the call's own argument list may nest, and the lookbehind
+    # keeps a call's own parentheses out of it.
+    WRAPPED_FUNCTION_CALL = /
+      (?<![\w.]) #{IN_LIST_OPENING}
+      \( (?<call>[a-z_][\w.]* (?<arguments>\( (?:[^()] | \g<arguments>)* \)) ) \)
+    /xi.freeze
+
+    # Matches a bare negated boolean predicate such as `NOT archived`, in the
+    # three places one can stand: at the start of an expression, after `AND` or
+    # `OR`, or after an opening parenthesis.
+    NEGATED_BOOLEAN_PREDICATE = /
+      (^ | (?: \bAND\b | \bOR\b | \( ))
+      \s* NOT \s+ ([a-z_][\w.]*) \s*
+      (?= $ | (?: \bAND\b | \bOR\b | \) ))
+    /xi.freeze
+
+    # Matches a bare boolean predicate such as `most_recent` in those same three
+    # places. It runs after the negated form so that `NOT archived` is already
+    # gone and cannot be read as the predicate `archived`.
+    BARE_BOOLEAN_PREDICATE = /
+      (^ | (?: \bAND\b | \bOR\b | \( ))
+      \s* ([a-z_][\w.]*) \s*
+      (?= $ | (?: \bAND\b | \bOR\b | \) ))
+    /xi.freeze
+
+    # Matches `column = ANY (ARRAY[...])` or `column != ALL ((ARRAY[...]))`,
+    # capturing the column name, the operator and the array payload. The inner
+    # parentheses come from Postgres indexdefs that wrap the array expression
+    # before casting; they are optional, but both or neither, so a group
+    # enclosing the whole predicate keeps its own.
+    ARRAY_MEMBERSHIP_PREDICATE = /
+      (?<column>[a-z_][\w.]*)\s*
+      (?<operator>=\s*ANY|(?:!=|<>)\s*ALL)\s*
+      \( (?: \(ARRAY\[(?<items>.*?)\]\) | ARRAY\[(?<items>.*?)\] ) \)
+    /xi.freeze
+
+    # Matches SQL like `NOT (column = '' OR column IS NULL)`, holding both sides
+    # to the same column with the backreference.
+    NEGATED_BLANK_OR_NIL_PREDICATE = /
+      NOT \s+ \( \s* \(?
+      ([a-z_][\w.]*) \s* = \s* '' \s+ OR \s+ \1 \s+ IS \s+ NULL
+      \)? \s* \)
+    /xi.freeze
+
     # Normalizes SQL predicates into a canonical form so semantically equivalent
     # Rails validators and database partial indexes can be compared safely.
     def normalize_condition_sql(sql)
+      # The two steps that read the inside of a literal run first, while it is
+      # still there to read. Everything after masking works on the shape of the
+      # predicate alone and so cannot rewrite a value by accident.
       masked_sql, literals = sql.to_s
-                                .then { |value| strip_outer_parentheses(value) }
-                                .then { |value| normalize_sql_pre_mask(value) }
+                                .then { |value| unquote_numeric_literals(value) }
+                                .then { |value| normalize_quoted_boolean_literals(value) }
                                 .then { |value| mask_condition_literals(value) }
 
-      normalize_masked_condition_sql(masked_sql, literals)
+      normalize_masked_condition_sql(
+        masked_sql.then { |value| strip_outer_parentheses(value) }
+                  .then { |value| normalize_boolean_and_null_keywords(value) },
+        literals
+      )
     end
 
     # Finishes normalization after string literals have been masked: runs the
-    # regex-based transforms that must not see inside literals, restores the
-    # literals, then applies the final clean-ups.
+    # regex-based transforms that must not see inside literals, applies the
+    # final structural clean-ups, and only then restores the literal values.
+    # Restoring last protects literal contents from whitespace collapse and
+    # clause sorting.
     def normalize_masked_condition_sql(masked_sql, literals)
       masked_sql
-        .then { |value| normalize_sql_post_mask(value) }
+        .then { |value| normalize_adapter_syntax(value) }
         .then { |value| normalize_boolean_predicates(value) }
         .then { |value| normalize_array_any_predicates(value) }
-        .then { |value| unmask_condition_literals(value, literals) }
         .then { |value| normalize_negated_blank_or_nil_predicates(value) }
-        .then { |value| sort_and_clauses(value) }
+        .then { |value| sort_and_clauses(value, literals) }
         .then { |value| value.gsub(/\s+/, ' ').strip }
+        .then { |value| unmask_condition_literals(value, literals) }
     end
 
     # Masks non-empty string literals so later regexes cannot rewrite their
@@ -224,7 +336,7 @@ module DatabaseConsistency
     # normalization relies on them.
     def mask_condition_literals(sql)
       literals = []
-      masked_sql = sql.gsub(/'(?:[^']|'')*'/) do |match|
+      masked_sql = sql.gsub(CONDITION_LITERAL) do |match|
         if match == "''"
           match
         else
@@ -244,9 +356,52 @@ module DatabaseConsistency
       sql
     end
 
-    # Normalizations that must run before string literals are masked.
-    def normalize_sql_pre_mask(sql)
+    # PostgreSQL writes any literal it had to coerce as a quoted string with a
+    # cast: `-1` becomes `'-1'::integer`, `-1.5` becomes `'-1.5'::numeric` and
+    # `1e+20` becomes `'1e+20'::double precision`. Unquoting those lets them line
+    # up with the bare numbers Active Record generates. A `::text` cast is left
+    # alone so a genuine string comparison keeps its quotes.
+    def unquote_numeric_literals(sql)
+      sql.gsub(COERCED_NUMERIC_LITERAL) { Regexp.last_match(1) }
+    end
+
+    # Rewrites a boolean written as the quoted `'t'` / `'f'` PostgreSQL stores.
+    # It reads the value inside the quotes, so it has to run before literals are
+    # masked, while that value is still there to read.
+    def normalize_quoted_boolean_literals(sql)
+      # Normalize PostgreSQL boolean literals stored as `'t'` / `'f'` inside
+      # comparisons. The operator is allowed to touch or be surrounded by
+      # arbitrary whitespace so forms like `flag='t'` and `flag  <>   'f'` all
+      # collapse to the same canonical shape. Inequality is preserved as `!=`
+      # because `flag <> 't'` is not the same as `flag = 'f'` (NULL handling
+      # differs), so they must not share a canonical form. The lookbehind holds
+      # the equality patterns to a standalone `=`, so the ordering comparison in
+      # `note >= 't'` keeps both its operator and its value.
+      sql
+        .gsub(/(?<![<>!])\s*=\s*'t'/, ' = 1')
+        .gsub(/(?<![<>!])\s*=\s*'f'/, ' = 0')
+        .gsub(/\s*<>\s*'t'/, ' != 1')
+        .gsub(/\s*<>\s*'f'/, ' != 0')
+        .gsub(/\s*!=\s*'t'/, ' != 1')
+        .gsub(/\s*!=\s*'f'/, ' != 0')
+    end
+
+    # Rewrites the `TRUE` / `FALSE` / `NULL` keywords and the `IS` phrasings
+    # around them to one spelling. These run once literals are masked, so a
+    # value that happens to read `IS TRUE` keeps its own text.
+    def normalize_boolean_and_null_keywords(sql)
       normalized_sql = sql.dup
+      # `IS NOT TRUE` / `IS NOT FALSE` are matched before the bare `IS TRUE` /
+      # `IS FALSE` forms so the longer phrase wins. They normalize to `IS NOT 1`
+      # / `IS NOT 0` rather than `= 0` / `= 1` because `IS NOT TRUE` is not the
+      # same as `= FALSE` (NULL handling differs).
+      normalized_sql = normalized_sql.gsub(/\bIS\s+NOT\s+TRUE\b/i, ' IS NOT 1')
+      normalized_sql = normalized_sql.gsub(/\bIS\s+NOT\s+FALSE\b/i, ' IS NOT 0')
+      # `/\bIS\s+TRUE\b/i` and `/\bIS\s+FALSE\b/i` normalize predicate forms
+      # like `flag IS TRUE` to `flag = 1` so they match `flag = TRUE` and
+      # `flag = 't'`.
+      normalized_sql = normalized_sql.gsub(/\bIS\s+TRUE\b/i, ' = 1')
+      normalized_sql = normalized_sql.gsub(/\bIS\s+FALSE\b/i, ' = 0')
       # `/\bTRUE\b/i` and `/\bFALSE\b/i` normalize boolean literals to `1` / `0`
       # so they match SQL generated by Active Record on some adapters.
       normalized_sql = normalized_sql.gsub(/\bTRUE\b/i, '1').gsub(/\bFALSE\b/i, '0')
@@ -254,25 +409,72 @@ module DatabaseConsistency
       normalized_sql = normalized_sql.gsub(/\bIS\s+NOT\s+NULL\b/i, ' IS NOT NULL')
       # `/\bIS\s+NULL\b/i` normalizes `IS NULL` spacing and casing.
       normalized_sql = normalized_sql.gsub(/\bIS\s+NULL\b/i, ' IS NULL')
-      # `/ = 't'/` and `/ = 'f'/` normalize PostgreSQL boolean literals stored
-      # as `'t'` / `'f'` inside comparisons.
-      normalized_sql = normalized_sql.gsub(/ = 't'/, ' = 1').gsub(/ = 'f'/, ' = 0')
       normalized_sql.gsub(/\s+/, ' ').strip
     end
 
-    # Normalizations that run while string literals are masked.
-    def normalize_sql_post_mask(sql)
+    # Rewrites exponent notation as the plain decimal PostgreSQL itself writes
+    # when it expands a literal, so `1e+20` and the `1.0e+20` Active Record
+    # generates reach the same string. The digits are shifted as text rather
+    # than through a float, so a wide value keeps every one of them.
+    def expand_exponent_literals(sql)
+      sql.gsub(EXPONENT_LITERAL) do
+        match = Regexp.last_match
+        shift_decimal_point(match[1], "#{match[2]}#{match[3]}", match[2].length + match[4].to_i)
+      end
+    end
+
+    # Places the decimal point `position` digits into `digits`, padding with
+    # zeros on whichever side falls short and dropping a fraction that ends in
+    # them, so `1e-20` and `1.0e-20` land on the same digits. A zero that only
+    # holds the decimal point's place goes too, so `0.1e+2` reaches `10`.
+    def shift_decimal_point(sign, digits, position)
+      expanded =
+        if position >= digits.length
+          digits + ('0' * (position - digits.length))
+        elsif position.positive?
+          "#{digits[0...position]}.#{digits[position..]}"
+        else
+          "0.#{'0' * -position}#{digits}"
+        end
+      # On Ruby < 3.0, frozen strings forbid `sub!`.
+      expanded = expanded.sub(/\A0+(?=\d)/, '')
+
+      "#{sign}#{expanded}".sub(/(\.\d*?)0+\z/, '\1').chomp('.')
+    end
+
+    # Rewrites the spellings that differ between adapters, or between what an
+    # adapter stores and what Active Record writes: quoted identifiers, casts,
+    # exponent notation, the spacing of an `IN` list, the parentheses PostgreSQL
+    # adds around a cast operand and the `<>` it writes for inequality. Literals are masked throughout, so
+    # none of it reaches the inside of a value.
+    def normalize_adapter_syntax(sql)
       # Strips quoted identifiers (double quotes on PostgreSQL/SQLite,
       # backticks on MySQL) so the same column normalizes across adapters.
       normalized_sql = sql.gsub(/["`]/, '')
-      # `/::\w+/` removes PostgreSQL casts like `column::text`.
-      normalized_sql = normalized_sql.gsub(/::\w+/, '')
-      # `/\(([a-z_][\w.]*)\)/i` unwraps a bare identifier surrounded by
-      # parentheses, e.g. `(internal_name)` -> `internal_name`.
-      normalized_sql = normalized_sql.gsub(/\(([a-z_][\w.]*)\)/i, '\1')
+      normalized_sql = normalized_sql.gsub(CONDITION_CAST, '')
+      normalized_sql = expand_exponent_literals(normalized_sql)
+      # Gives `IN` one space before its list, so `qty IN(1)` and `qty IN (1)`
+      # reach the same string and the list is recognisable to the unwrappers
+      # below. `\b` keeps a call such as `min(1)` out of it.
+      normalized_sql = normalized_sql.gsub(/\bIN\s*\(/i, 'IN (')
+      normalized_sql = unwrap_redundant_parentheses(normalized_sql)
       # `/\s*<>\s*/` rewrites the SQL inequality operator `<>` to `!=`.
       normalized_sql = normalized_sql.gsub(/\s*<>\s*/, ' != ')
       normalized_sql.gsub(/\s+/, ' ').strip
+    end
+
+    # Removes the parentheses PostgreSQL puts around an operand it had to cast,
+    # which are redundant once the cast itself is gone: `(0)::numeric` -> `0`,
+    # `((name)::character varying(3))::text` -> `name`, `(abs(1))::numeric` ->
+    # `abs(1)`. Each pass repeats because removing one layer can expose another.
+    def unwrap_redundant_parentheses(sql)
+      normalized_sql = sql.dup
+
+      true while normalized_sql.gsub!(WRAPPED_IDENTIFIER, '\1')
+      true while normalized_sql.gsub!(WRAPPED_NUMBER, '\1')
+      true while normalized_sql.gsub!(WRAPPED_FUNCTION_CALL, '\k<call>')
+
+      normalized_sql
     end
 
     # Repeatedly removes one wrapping layer of parentheses when the whole SQL
@@ -317,52 +519,51 @@ module DatabaseConsistency
     def normalize_boolean_predicates(sql)
       normalized_sql = sql.dup
 
-      # Matches a bare negated boolean predicate such as `NOT archived`
-      # appearing at the start of an expression, after `AND` / `OR`, or after
-      # an opening parenthesis, and rewrites it to `archived = 0`.
-      normalized_sql.gsub!(
-        /(^|(?:\bAND\b|\bOR\b|\())\s*NOT\s+([a-z_][\w.]*)\s*(?=$|(?:\bAND\b|\bOR\b|\)))/i
-      ) { "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 0" }
+      normalized_sql.gsub!(NEGATED_BOOLEAN_PREDICATE) do
+        "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 0"
+      end
 
-      # Matches a bare boolean predicate such as `most_recent` appearing in the
-      # same structural positions, and rewrites it to `most_recent = 1`.
-      normalized_sql.gsub!(
-        /(^|(?:\bAND\b|\bOR\b|\())\s*([a-z_][\w.]*)\s*(?=$|(?:\bAND\b|\bOR\b|\)))/i
-      ) { "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 1" }
+      normalized_sql.gsub!(BARE_BOOLEAN_PREDICATE) do
+        "#{Regexp.last_match(1)} #{Regexp.last_match(2)} = 1"
+      end
 
       normalized_sql.gsub(/\s+/, ' ').strip
     end
 
-    # Rewrites PostgreSQL's `= ANY (ARRAY[...])` form into an `IN (...)` form
-    # so it matches the SQL Active Record typically generates for arrays.
+    # Rewrites PostgreSQL's `= ANY (ARRAY[...])` and `<> ALL (ARRAY[...])` forms
+    # into the `IN (...)` and `NOT IN (...)` Active Record generates for arrays.
+    # `<>` has already become `!=` by this point in the pipeline.
     def normalize_array_any_predicates(sql)
-      sql.gsub(
-        # Matches `column = ANY (ARRAY[...])`, capturing the column name and the
-        # full array payload so it can be converted to `column IN (...)`.
-        /([a-z_][\w.]*)\s*=\s*ANY\s*\(ARRAY\[(.*?)\]\)/i
-      ) { "#{Regexp.last_match(1)} IN (#{Regexp.last_match(2).gsub(/\s+/, ' ').strip})" }
+      sql.gsub(ARRAY_MEMBERSHIP_PREDICATE) do
+        match = Regexp.last_match
+        membership = match[:operator].match?(/ANY/i) ? 'IN' : 'NOT IN'
+
+        "#{match[:column]} #{membership} (#{match[:items].gsub(/\s+/, ' ').strip})"
+      end
     end
 
     # Rewrites negated "blank or nil" predicates into the same shape used by
     # `allow_blank`-derived guards: `IS NOT NULL AND != ''`.
     def normalize_negated_blank_or_nil_predicates(sql)
-      sql.gsub(
-        # Matches SQL like `NOT (column = '' OR column IS NULL)` while enforcing
-        # the same column name on both sides via backreference `\1`.
-        /NOT\s+\(\s*\(?([a-z_][\w.]*)\s*=\s*''\s+OR\s+\1\s+IS\s+NULL\)?\s*\)/i
-      ) { "#{Regexp.last_match(1)} IS NOT NULL AND #{Regexp.last_match(1)} != ''" }
+      sql.gsub(NEGATED_BLANK_OR_NIL_PREDICATE) do
+        "#{Regexp.last_match(1)} IS NOT NULL AND #{Regexp.last_match(1)} != ''"
+      end
     end
 
     # Sorts simple `AND` clauses so `a AND b` and `b AND a` normalize to the
-    # same string before comparison.
-    def sort_and_clauses(sql)
+    # same string before comparison. Two clauses can be identical apart from the
+    # string each one compares against, and then those strings decide the order,
+    # which is why the literals go back in before the sort. A placeholder is
+    # numbered by where its literal appeared, so sorting on the placeholders
+    # would leave such a pair in whichever order it arrived in.
+    def sort_and_clauses(sql, literals)
       # Matches `AND` with surrounding whitespace and splits the expression into
       # comparable clause fragments.
       clauses = sql.split(/\s+AND\s+/i)
       return sql if clauses.length == 1
 
       clauses.map! { |clause| strip_outer_parentheses(clause) }
-      clauses.sort.join(' AND ')
+      clauses.sort_by { |clause| unmask_condition_literals(clause, literals) }.join(' AND ')
     end
 
     # Builds the implicit SQL guard introduced by validator options that skip
