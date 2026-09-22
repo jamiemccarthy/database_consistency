@@ -116,11 +116,10 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
           .to eq("b = 1 AND name = 'foo AND bar'")
       end
 
-      # Clause sorting is what lets a validator and an index spell the same two
-      # restrictions in either order. When the clauses are alike up to their
-      # values, the values are what decides the order.
+      # Clause sorting is what lets a validator and an index write the same two
+      # restrictions in either order. When two clauses are identical apart from
+      # the string each one compares against, those strings decide the order.
       it 'sorts clauses that differ only in their literal' do
-        pending 'clause sorting sees the placeholders rather than the literals they stand for'
         # validator conditions: -> { where.not(status: 'archived').where.not(status: 'draft') }
         expect(described_class.normalize_condition_sql("status != 'archived' AND status != 'draft'"))
           .to eq("status != 'archived' AND status != 'draft'")
@@ -131,7 +130,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'sorts a literal-only pair against a clause that carries no literal' do
-        pending 'clause sorting sees the placeholders rather than the literals they stand for'
         # validator conditions:
         #   -> { where.not(status: nil).where.not(status: 'draft').where.not(status: 'archived') }
         expect(described_class.normalize_condition_sql(
@@ -421,11 +419,11 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
           .to eq("state IN ('draft', 'published')")
       end
 
-      # A one-item list reaches the normalizer from `where('qty IN (?)', ids)`
-      # holding a single id. Its parentheses are the list itself rather than a
-      # wrapper around the value, so they stay, as they do for a longer list.
+      # `where('qty IN (?)', ids)` writes a one-item list whenever `ids` holds
+      # a single id. The parentheses are the list itself rather than something
+      # wrapped around the value, so they stay, just as they do for a longer
+      # list.
       it 'keeps the parentheses of a single-item IN list' do
-        pending 'parenthesis unwrapping reads the single item as a wrapped value'
         # validator conditions: -> { where('qty IN (?)', [1]) }
         expect(described_class.normalize_condition_sql('(qty IN (1))')).to eq('qty IN (1)')
         # index     where: 'qty = ANY (ARRAY[1])' on an integer column
@@ -433,7 +431,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'keeps the parentheses of a single-item NOT IN list' do
-        pending 'parenthesis unwrapping reads the single item as a wrapped value'
         # validator conditions: -> { where('qty NOT IN (?)', [1]) }
         expect(described_class.normalize_condition_sql('(qty NOT IN (1))')).to eq('qty NOT IN (1)')
         # index     where: 'qty <> ALL (ARRAY[1])'
@@ -443,7 +440,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       # The space before an `IN` list is optional in SQL, and the list the index
       # side arrives as always carries one, so both spellings settle on it.
       it 'gives an IN list written without a space the one the index side has' do
-        pending 'IN without a space is normalized'
         # validator conditions: -> { where('qty IN(?)', [1]) }
         expect(described_class.normalize_condition_sql('(qty IN(1))')).to eq('qty IN (1)')
         # validator conditions: -> { where('qty IN(?)', [1, 2]) }
