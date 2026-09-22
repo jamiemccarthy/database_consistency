@@ -116,6 +116,33 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
           .to eq("b = 1 AND name = 'foo AND bar'")
       end
 
+      # Clause sorting is what lets a validator and an index spell the same two
+      # restrictions in either order. When the clauses are alike up to their
+      # values, the values are what decides the order.
+      it 'sorts clauses that differ only in their literal' do
+        pending 'clause sorting sees the placeholders rather than the literals they stand for'
+        # validator conditions: -> { where.not(status: 'archived').where.not(status: 'draft') }
+        expect(described_class.normalize_condition_sql("status != 'archived' AND status != 'draft'"))
+          .to eq("status != 'archived' AND status != 'draft'")
+        # index     where: "status <> 'draft' AND status <> 'archived'" on a text column
+        expect(described_class.normalize_condition_sql(
+                 "((status <> 'draft'::text) AND (status <> 'archived'::text))"
+               )).to eq("status != 'archived' AND status != 'draft'")
+      end
+
+      it 'sorts a literal-only pair against a clause that carries no literal' do
+        pending 'clause sorting sees the placeholders rather than the literals they stand for'
+        # validator conditions:
+        #   -> { where.not(status: nil).where.not(status: 'draft').where.not(status: 'archived') }
+        expect(described_class.normalize_condition_sql(
+                 "status IS NOT NULL AND status != 'draft' AND status != 'archived'"
+               )).to eq("status != 'archived' AND status != 'draft' AND status IS NOT NULL")
+        # index     where: "status IS NOT NULL AND status <> 'archived' AND status <> 'draft'"
+        expect(described_class.normalize_condition_sql(
+                 "((status IS NOT NULL) AND (status <> 'archived'::text) AND (status <> 'draft'::text))"
+               )).to eq("status != 'archived' AND status != 'draft' AND status IS NOT NULL")
+      end
+
       it 'does not unwrap parentheses around a value that looks like a column' do
         expect(described_class.normalize_condition_sql("code = '(none)'"))
           .to eq("code = '(none)'")
@@ -392,6 +419,25 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
         # validator conditions: -> { where(state: %w[draft published]) }
         expect(described_class.normalize_condition_sql("(state IN ('draft', 'published'))"))
           .to eq("state IN ('draft', 'published')")
+      end
+
+      # A one-item list reaches the normalizer from `where('qty IN (?)', ids)`
+      # holding a single id. Its parentheses are the list itself rather than a
+      # wrapper around the value, so they stay, as they do for a longer list.
+      it 'keeps the parentheses of a single-item IN list' do
+        pending 'parenthesis unwrapping reads the single item as a wrapped value'
+        # validator conditions: -> { where('qty IN (?)', [1]) }
+        expect(described_class.normalize_condition_sql('(qty IN (1))')).to eq('qty IN (1)')
+        # index     where: 'qty = ANY (ARRAY[1])' on an integer column
+        expect(described_class.normalize_condition_sql('(qty = ANY (ARRAY[1]))')).to eq('qty IN (1)')
+      end
+
+      it 'keeps the parentheses of a single-item NOT IN list' do
+        pending 'parenthesis unwrapping reads the single item as a wrapped value'
+        # validator conditions: -> { where('qty NOT IN (?)', [1]) }
+        expect(described_class.normalize_condition_sql('(qty NOT IN (1))')).to eq('qty NOT IN (1)')
+        # index     where: 'qty <> ALL (ARRAY[1])'
+        expect(described_class.normalize_condition_sql('(qty <> ALL (ARRAY[1]))')).to eq('qty NOT IN (1)')
       end
 
       # The parentheses around `ARRAY[...]` are optional but always come as a
