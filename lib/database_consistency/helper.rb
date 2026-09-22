@@ -426,7 +426,8 @@ module DatabaseConsistency
         else
           "0.#{'0' * -position}#{digits}"
         end
-      expanded.sub!(/\A0+(?=\d)/, '')
+      # On Ruby < 3.0, frozen strings forbid `sub!`.
+      expanded = expanded.sub(/\A0+(?=\d)/, '')
 
       "#{sign}#{expanded}".sub(/(\.\d*?)0+\z/, '\1').chomp('.')
     end
