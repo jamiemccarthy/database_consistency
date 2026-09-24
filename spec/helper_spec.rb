@@ -270,7 +270,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
     # the same spacing.
     context 'with operators and commas written without spaces' do
       it 'spaces a comparison operator' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where('qty=1') }
         expect(described_class.normalize_condition_sql('qty=1')).to eq('qty = 1')
         # index     where: 'qty = 1' on an integer column
@@ -298,7 +297,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'spaces a comparison operator against a string literal' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where("status='live'") }
         expect(described_class.normalize_condition_sql("status='live'")).to eq("status = 'live'")
         # index     where: "status = 'live'" on a varchar column
@@ -306,7 +304,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'keeps the sign of a negative number with its digits' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where('qty>-1') }
         expect(described_class.normalize_condition_sql('qty>-1')).to eq('qty > -1')
         # index     where: 'qty > -1' on an integer column
@@ -331,7 +328,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'spaces the operators of a conjunction' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where("qty>=1 AND status='x'") }
         expect(described_class.normalize_condition_sql("qty>=1 AND status='x'")).to eq("qty >= 1 AND status = 'x'")
         # index     where: "qty >= 1 AND status = 'x'" on an integer and a varchar column
@@ -340,7 +336,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'spaces the items of an IN list' do
-        pending 'commas are not given spaces'
         # validator conditions: -> { where('qty IN (1,2)') }
         expect(described_class.normalize_condition_sql('qty IN (1,2)')).to eq('qty IN (1, 2)')
         # index     where: 'qty IN (1,2)' on an integer column
@@ -362,7 +357,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'drops the space inside the parentheses of a list' do
-        pending 'spaces inside parentheses and around commas are kept'
         # validator conditions: -> { where('qty IN ( 1 , 2 )') }
         expect(described_class.normalize_condition_sql('qty IN ( 1 , 2 )')).to eq('qty IN (1, 2)')
         # index     where: 'qty IN ( 1 , 2 )' on an integer column
@@ -370,7 +364,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'spaces the arguments of a function call' do
-        pending 'commas and spaces inside parentheses are left as typed'
         # validator conditions: -> { where('COALESCE(qty,0)>0') }
         expect(described_class.normalize_condition_sql('COALESCE(qty,0)>0')).to eq('COALESCE(qty, 0) > 0')
         # index     where: 'COALESCE(qty,0) > 0' on an integer column
@@ -392,7 +385,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'spaces an array or jsonb containment operator' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where("tags@>'{a}'") }
         expect(described_class.normalize_condition_sql("tags@>'{a}'")).to eq("tags @> '{a}'")
         # index     where: "tags @> '{a}'" on a varchar array column
@@ -413,7 +405,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'spaces a regular-expression operator' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where("name~'^a'") }
         expect(described_class.normalize_condition_sql("name~'^a'")).to eq("name ~ '^a'")
         # index     where: "name ~ '^a'" on a varchar column
@@ -425,7 +416,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
 
       it 'spaces a jsonb field operator' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where("(data->>'kind') = 'x'") }
         expect(described_class.normalize_condition_sql("(data->>'kind') = 'x'")).to eq("(data ->> 'kind') = 'x'")
         # index     where: "(data->>'kind') = 'x'" on a jsonb column
@@ -441,7 +431,6 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       # The literal is masked while the operator beside it is spaced, so its
       # angle brackets are neither spaced nor mistaken for the operator's.
       it 'spaces an operator beside a literal holding angle brackets' do
-        pending 'only <> is given spaces'
         # validator conditions: -> { where("label='<none>'") }
         expect(described_class.normalize_condition_sql("label='<none>'")).to eq("label = '<none>'")
         # index     where: "label = '<none>'" on a varchar column
