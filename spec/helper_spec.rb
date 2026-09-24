@@ -264,6 +264,208 @@ RSpec.describe DatabaseConsistency::Helper, :sqlite, :mysql, :postgresql do
       end
     end
 
+    # PostgreSQL writes every operator with a space either side and every list
+    # with a space after each comma, however the index was typed. A raw `where`
+    # string reaches the validator side exactly as typed, so it has to be given
+    # the same spacing.
+    context 'with operators and commas written without spaces' do
+      it 'spaces a comparison operator' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where('qty=1') }
+        expect(described_class.normalize_condition_sql('qty=1')).to eq('qty = 1')
+        # index     where: 'qty = 1' on an integer column
+        expect(described_class.normalize_condition_sql('(qty = 1)')).to eq('qty = 1')
+        # validator conditions: -> { where('qty>=1') }
+        expect(described_class.normalize_condition_sql('qty>=1')).to eq('qty >= 1')
+        # index     where: 'qty >= 1'
+        expect(described_class.normalize_condition_sql('(qty >= 1)')).to eq('qty >= 1')
+        # validator conditions: -> { where('qty<=10') }
+        expect(described_class.normalize_condition_sql('qty<=10')).to eq('qty <= 10')
+        # index     where: 'qty <= 10'
+        expect(described_class.normalize_condition_sql('(qty <= 10)')).to eq('qty <= 10')
+        # validator conditions: -> { where('qty>0') }
+        expect(described_class.normalize_condition_sql('qty>0')).to eq('qty > 0')
+        # index     where: 'qty > 0'
+        expect(described_class.normalize_condition_sql('(qty > 0)')).to eq('qty > 0')
+        # validator conditions: -> { where('qty<10') }
+        expect(described_class.normalize_condition_sql('qty<10')).to eq('qty < 10')
+        # index     where: 'qty < 10'
+        expect(described_class.normalize_condition_sql('(qty < 10)')).to eq('qty < 10')
+        # validator conditions: -> { where('qty!=1') }
+        expect(described_class.normalize_condition_sql('qty!=1')).to eq('qty != 1')
+        # index     where: 'qty != 1'
+        expect(described_class.normalize_condition_sql('(qty <> 1)')).to eq('qty != 1')
+      end
+
+      it 'spaces a comparison operator against a string literal' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where("status='live'") }
+        expect(described_class.normalize_condition_sql("status='live'")).to eq("status = 'live'")
+        # index     where: "status = 'live'" on a varchar column
+        expect(described_class.normalize_condition_sql("((status)::text = 'live'::text)")).to eq("status = 'live'")
+      end
+
+      it 'keeps the sign of a negative number with its digits' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where('qty>-1') }
+        expect(described_class.normalize_condition_sql('qty>-1')).to eq('qty > -1')
+        # index     where: 'qty > -1' on an integer column
+        expect(described_class.normalize_condition_sql("(qty > '-1'::integer)")).to eq('qty > -1')
+        # validator conditions: -> { where('qty=-1') }
+        expect(described_class.normalize_condition_sql('qty=-1')).to eq('qty = -1')
+        # index     where: 'qty = -1'
+        expect(described_class.normalize_condition_sql("(qty = '-1'::integer)")).to eq('qty = -1')
+      end
+
+      # A minus sign can be a sign or subtraction, and telling those apart takes
+      # a parser, so `+` and `-` keep whatever spacing they were written with.
+      it 'leaves the spacing of a plus or minus sign alone' do
+        # validator conditions: -> { where('qty = -1') }
+        expect(described_class.normalize_condition_sql('qty = -1')).to eq('qty = -1')
+        # validator conditions: -> { where('qty - 1 > 0') }
+        expect(described_class.normalize_condition_sql('qty - 1 > 0')).to eq('qty - 1 > 0')
+        # validator conditions: -> { where('qty + 1 > 2') }
+        expect(described_class.normalize_condition_sql('qty + 1 > 2')).to eq('qty + 1 > 2')
+        # validator conditions: -> { where('qty+1 > 2') }
+        expect(described_class.normalize_condition_sql('qty+1 > 2')).to eq('qty+1 > 2')
+      end
+
+      it 'spaces the operators of a conjunction' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where("qty>=1 AND status='x'") }
+        expect(described_class.normalize_condition_sql("qty>=1 AND status='x'")).to eq("qty >= 1 AND status = 'x'")
+        # index     where: "qty >= 1 AND status = 'x'" on an integer and a varchar column
+        expect(described_class.normalize_condition_sql("((qty >= 1) AND ((status)::text = 'x'::text))"))
+          .to eq("qty >= 1 AND status = 'x'")
+      end
+
+      it 'spaces the items of an IN list' do
+        pending 'commas are not given spaces'
+        # validator conditions: -> { where('qty IN (1,2)') }
+        expect(described_class.normalize_condition_sql('qty IN (1,2)')).to eq('qty IN (1, 2)')
+        # index     where: 'qty IN (1,2)' on an integer column
+        expect(described_class.normalize_condition_sql('(qty = ANY (ARRAY[1, 2]))')).to eq('qty IN (1, 2)')
+        # validator conditions: -> { where('qty IN(1,2)') }
+        expect(described_class.normalize_condition_sql('qty IN(1,2)')).to eq('qty IN (1, 2)')
+        # validator conditions: -> { where("status IN ('a','b')") }
+        expect(described_class.normalize_condition_sql("status IN ('a','b')")).to eq("status IN ('a', 'b')")
+        # index     where: "status IN ('a','b')" on a varchar column
+        expect(described_class.normalize_condition_sql(
+                 "((status)::text = ANY ((ARRAY['a'::character varying, 'b'::character varying])::text[]))"
+               )).to eq("status IN ('a', 'b')")
+        # validator conditions: -> { where("status NOT IN ('a','b')") }
+        expect(described_class.normalize_condition_sql("status NOT IN ('a','b')")).to eq("status NOT IN ('a', 'b')")
+        # index     where: "status NOT IN ('a','b')"
+        expect(described_class.normalize_condition_sql(
+                 "((status)::text <> ALL ((ARRAY['a'::character varying, 'b'::character varying])::text[]))"
+               )).to eq("status NOT IN ('a', 'b')")
+      end
+
+      it 'drops the space inside the parentheses of a list' do
+        pending 'spaces inside parentheses and around commas are kept'
+        # validator conditions: -> { where('qty IN ( 1 , 2 )') }
+        expect(described_class.normalize_condition_sql('qty IN ( 1 , 2 )')).to eq('qty IN (1, 2)')
+        # index     where: 'qty IN ( 1 , 2 )' on an integer column
+        expect(described_class.normalize_condition_sql('(qty = ANY (ARRAY[1, 2]))')).to eq('qty IN (1, 2)')
+      end
+
+      it 'spaces the arguments of a function call' do
+        pending 'commas and spaces inside parentheses are left as typed'
+        # validator conditions: -> { where('COALESCE(qty,0)>0') }
+        expect(described_class.normalize_condition_sql('COALESCE(qty,0)>0')).to eq('COALESCE(qty, 0) > 0')
+        # index     where: 'COALESCE(qty,0) > 0' on an integer column
+        expect(described_class.normalize_condition_sql('(COALESCE(qty, 0) > 0)')).to eq('COALESCE(qty, 0) > 0')
+        # validator conditions: -> { where("lower( name ) = 'x'") }
+        expect(described_class.normalize_condition_sql("lower( name ) = 'x'")).to eq("lower(name) = 'x'")
+        # index     where: "lower(name) = 'x'" on a varchar column
+        expect(described_class.normalize_condition_sql("(lower((name)::text) = 'x'::text)"))
+          .to eq("lower(name) = 'x'")
+        # validator conditions: -> { where('COALESCE( qty, 0 ) > 0') }
+        expect(described_class.normalize_condition_sql('COALESCE( qty, 0 ) > 0')).to eq('COALESCE(qty, 0) > 0')
+        # validator conditions: -> { where("COALESCE(NULLIF(name,''),'x')='y'") }
+        expect(described_class.normalize_condition_sql("COALESCE(NULLIF(name,''),'x')='y'"))
+          .to eq("COALESCE(NULLIF(name, ''), 'x') = 'y'")
+        # index     where: "COALESCE(NULLIF(name,''),'x') = 'y'" on a varchar column
+        expect(described_class.normalize_condition_sql(
+                 "(COALESCE(NULLIF((name)::text, ''::text), 'x'::text) = 'y'::text)"
+               )).to eq("COALESCE(NULLIF(name, ''), 'x') = 'y'")
+      end
+
+      it 'spaces an array or jsonb containment operator' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where("tags@>'{a}'") }
+        expect(described_class.normalize_condition_sql("tags@>'{a}'")).to eq("tags @> '{a}'")
+        # index     where: "tags @> '{a}'" on a varchar array column
+        expect(described_class.normalize_condition_sql("(tags @> '{a}'::character varying[])")).to eq("tags @> '{a}'")
+        # validator conditions: -> { where("tags&&'{a}'") }
+        expect(described_class.normalize_condition_sql("tags&&'{a}'")).to eq("tags && '{a}'")
+        # index     where: "tags && '{a}'"
+        expect(described_class.normalize_condition_sql("(tags && '{a}'::character varying[])")).to eq("tags && '{a}'")
+        # validator conditions: -> { where("data?'kind'") }
+        expect(described_class.normalize_condition_sql("data?'kind'")).to eq("data ? 'kind'")
+        # index     where: "data ? 'kind'" on a jsonb column
+        expect(described_class.normalize_condition_sql("(data ? 'kind'::text)")).to eq("data ? 'kind'")
+        # validator conditions: -> { where("data?|array['a','b']") }
+        expect(described_class.normalize_condition_sql("data?|array['a','b']")).to eq("data ?| array['a', 'b']")
+        # index     where: "data ?| array['a','b']"
+        expect(described_class.normalize_condition_sql("(data ?| ARRAY['a'::text, 'b'::text])"))
+          .to eq("data ?| ARRAY['a', 'b']")
+      end
+
+      it 'spaces a regular-expression operator' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where("name~'^a'") }
+        expect(described_class.normalize_condition_sql("name~'^a'")).to eq("name ~ '^a'")
+        # index     where: "name ~ '^a'" on a varchar column
+        expect(described_class.normalize_condition_sql("((name)::text ~ '^a'::text)")).to eq("name ~ '^a'")
+        # validator conditions: -> { where("name!~*'^a'") }
+        expect(described_class.normalize_condition_sql("name!~*'^a'")).to eq("name !~* '^a'")
+        # index     where: "name !~* '^a'"
+        expect(described_class.normalize_condition_sql("((name)::text !~* '^a'::text)")).to eq("name !~* '^a'")
+      end
+
+      it 'spaces a jsonb field operator' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where("(data->>'kind') = 'x'") }
+        expect(described_class.normalize_condition_sql("(data->>'kind') = 'x'")).to eq("(data ->> 'kind') = 'x'")
+        # index     where: "(data->>'kind') = 'x'" on a jsonb column
+        expect(described_class.normalize_condition_sql("((data ->> 'kind'::text) = 'x'::text)"))
+          .to eq("(data ->> 'kind') = 'x'")
+        # validator conditions: -> { where(%q{(data->'kind')='"x"'}) }
+        expect(described_class.normalize_condition_sql(%q{(data->'kind')='"x"'})).to eq(%q{(data -> 'kind') = '"x"'})
+        # index     where: %q{(data->'kind') = '"x"'}
+        expect(described_class.normalize_condition_sql(%q{((data -> 'kind'::text) = '"x"'::jsonb)}))
+          .to eq(%q{(data -> 'kind') = '"x"'})
+      end
+
+      # The literal is masked while the operator beside it is spaced, so its
+      # angle brackets are neither spaced nor mistaken for the operator's.
+      it 'spaces an operator beside a literal holding angle brackets' do
+        pending 'only <> is given spaces'
+        # validator conditions: -> { where("label='<none>'") }
+        expect(described_class.normalize_condition_sql("label='<none>'")).to eq("label = '<none>'")
+        # index     where: "label = '<none>'" on a varchar column
+        expect(described_class.normalize_condition_sql("((label)::text = '<none>'::text)")).to eq("label = '<none>'")
+        # validator conditions: -> { where("label>'a>b'") }
+        expect(described_class.normalize_condition_sql("label>'a>b'")).to eq("label > 'a>b'")
+        # index     where: "label > 'a>b'"
+        expect(described_class.normalize_condition_sql("((label)::text > 'a>b'::text)")).to eq("label > 'a>b'")
+      end
+
+      # Literals are masked before any spacing runs, so an operator or a comma
+      # inside one is part of the value.
+      it 'leaves operators and commas inside a string literal alone' do
+        # validator conditions: -> { where(label: 'a>=b,c') }
+        expect(described_class.normalize_condition_sql("label = 'a>=b,c'")).to eq("label = 'a>=b,c'")
+        # validator conditions: -> { where(label: ['x,y', 'z']) }
+        expect(described_class.normalize_condition_sql("label IN ('x,y', 'z')")).to eq("label IN ('x,y', 'z')")
+        # validator conditions: -> { where("label<>'<none>'") }
+        expect(described_class.normalize_condition_sql("label<>'<none>'")).to eq("label != '<none>'")
+        # index     where: "label <> '<none>'" on a varchar column
+        expect(described_class.normalize_condition_sql("((label)::text <> '<none>'::text)")).to eq("label != '<none>'")
+      end
+    end
+
     context 'with parenthesized numeric literals' do
       it 'unwraps a parenthesized integer literal with a cast' do
         # index     where: 'price > 0' on a numeric column
